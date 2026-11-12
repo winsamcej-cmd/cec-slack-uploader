@@ -27,35 +27,44 @@ router.get('/channels', async (req, res) => {
   }
 });
 
-router.post('/upload', upload.single('photo'), async (req, res) => {
+router.post('/upload', upload.array('photos', 10), async (req, res) => {
   try {
     const { channelId, senderName, caption } = req.body;
-    const file = req.file;
+    const files = req.files;
 
-    if (!file || !channelId) {
-      return res.status(400).json({ error: 'Missing image or channel' });
+    if (!files || !files.length || !channelId) {
+      return res.status(400).json({ error: 'Missing images or channel' });
     }
 
-    const urlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SLACK_TOKEN}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        filename: file.originalname || 'photo.jpg',
-        length: file.size.toString(),
-      }),
-    });
-    const urlData = await urlRes.json();
-    if (!urlData.ok) throw new Error(urlData.error);
+    // Upload all files to Slack simultaneously (prevents Netlify 10s timeout)
+    const uploadedFiles = await Promise.all(
+      files.map(async (file, i) => {
+        const filename = file.originalname || `photo_${i + 1}.jpg`;
 
-    const uploadRes = await fetch(urlData.upload_url, {
-      method: 'POST',
-      headers: { 'Content-Type': file.mimetype },
-      body: file.buffer,
-    });
-    if (!uploadRes.ok) throw new Error('Failed to transfer file bytes');
+        const urlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${SLACK_TOKEN}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            filename,
+            length: file.size.toString(),
+          }),
+        });
+        const urlData = await urlRes.json();
+        if (!urlData.ok) throw new Error(urlData.error);
+
+        const uploadRes = await fetch(urlData.upload_url, {
+          method: 'POST',
+          headers: { 'Content-Type': file.mimetype },
+          body: file.buffer,
+        });
+        if (!uploadRes.ok) throw new Error(`Failed to transfer ${filename}`);
+
+        return { id: urlData.file_id, title: filename };
+      })
+    );
 
     const formattedMessage = `*Sent by ${senderName || 'Anonymous'}*${caption ? `: ${caption}` : ''}`;
 
@@ -66,7 +75,7 @@ router.post('/upload', upload.single('photo'), async (req, res) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        files: [{ id: urlData.file_id, title: file.originalname || 'Photo' }],
+        files: uploadedFiles,
         channel_id: channelId,
         initial_comment: formattedMessage,
       }),
