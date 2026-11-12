@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lite Slack Media Sender</title>
   <link rel="icon" type="image/png" href="/icon.png" />
   <link rel="apple-touch-icon" href="/icon.png" />
   <link rel="manifest" href="/manifest.json" />
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Lite Slack Photo Sender</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 440px; margin: 2rem auto; padding: 0 1rem; color: #111; }
     label { display: block; font-weight: 600; margin-top: 1rem; margin-bottom: 0.35rem; }
@@ -18,7 +18,7 @@
   </style>
 </head>
 <body>
-  <h2>Lite Slack Photo Sender</h2>
+  <h2>Lite Slack Media Sender</h2>
 
   <label for="sender">Your Name</label>
   <input id="sender" type="text" placeholder="e.g. Alex" required />
@@ -26,29 +26,27 @@
   <label for="channel">Slack Channel</label>
   <select id="channel"><option>Loading channels...</option></select>
 
-  <label for="photo">Select or Take Photo</label>
-  <input id="photo" type="file" accept="image/*" />
+  <label for="media">Select Photos or Short Videos (max 5.5 MB total)</label>
+  <input id="media" type="file" accept="image/*,video/*" multiple />
   <div id="sizeInfo" class="meta"></div>
 
   <label for="caption">Caption (optional)</label>
   <input id="caption" type="text" placeholder="Add a quick note..." />
 
-  <button id="sendBtn" onclick="sendPhoto()">Optimize & Send to Slack</button>
+  <button id="sendBtn" onclick="sendMedia()">Optimize & Send to Slack</button>
   <div id="status"></div>
 
   <script>
     const senderInput = document.getElementById('sender');
     const channelSelect = document.getElementById('channel');
-    const photoInput = document.getElementById('photo');
+    const mediaInput = document.getElementById('media');
     const sizeInfo = document.getElementById('sizeInfo');
     const statusDiv = document.getElementById('status');
     const sendBtn = document.getElementById('sendBtn');
 
-    // Remember sender name between visits
     senderInput.value = localStorage.getItem('slack_sender_name') || '';
     senderInput.addEventListener('input', () => localStorage.setItem('slack_sender_name', senderInput.value));
 
-    // Load available channels on startup
     fetch('/api/channels')
       .then(r => r.json())
       .then(data => {
@@ -61,11 +59,11 @@
         }
       });
 
-    // Compress image locally using HTML5 Canvas
     function compressImage(file, maxWidth = 1280, quality = 0.75) {
       return new Promise((resolve) => {
         const img = new Image();
-        img.src = URL.createObjectURL(file);
+        const objectUrl = URL.createObjectURL(file);
+        img.src = objectUrl;
         img.onload = () => {
           const scale = Math.min(1, maxWidth / img.width);
           const canvas = document.createElement('canvas');
@@ -73,42 +71,70 @@
           canvas.height = img.height * scale;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(objectUrl);
           canvas.toBlob((blob) => resolve(blob), 'image/jpeg', quality);
         };
       });
     }
 
-    async function sendPhoto() {
-      const file = photoInput.files[0];
+    async function sendMedia() {
+      const files = Array.from(mediaInput.files);
       const channelId = channelSelect.value;
       const senderName = senderInput.value.trim();
 
       if (!senderName) return alert('Please enter your name.');
       if (!channelId) return alert('Please select a channel.');
-      if (!file) return alert('Please choose a photo.');
+      if (!files.length) return alert('Please choose at least one photo or video.');
+      if (files.length > 10) return alert('Please select up to 10 files at a time.');
 
       sendBtn.disabled = true;
-      statusDiv.textContent = 'Compressing photo on your device...';
+      sizeInfo.textContent = '';
 
       try {
-        const compressedBlob = await compressImage(file);
-        const origKB = Math.round(file.size / 1024);
-        const newKB = Math.round(compressedBlob.size / 1024);
-        sizeInfo.textContent = `Compressed: ${origKB} KB → ${newKB} KB`;
-
-        statusDiv.textContent = 'Uploading to Slack...';
         const formData = new FormData();
-        formData.append('photo', compressedBlob, 'optimized.jpg');
         formData.append('channelId', channelId);
         formData.append('senderName', senderName);
         formData.append('caption', document.getElementById('caption').value.trim());
 
+        let totalOrigBytes = 0;
+        let totalNewBytes = 0;
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          totalOrigBytes += file.size;
+
+          if (file.type.startsWith('image/')) {
+            statusDiv.textContent = `Compressing image ${i + 1} of ${files.length}...`;
+            const compressedBlob = await compressImage(file);
+            totalNewBytes += compressedBlob.size;
+            formData.append('photos', compressedBlob, `photo_${i + 1}.jpg`);
+          } else if (file.type.startsWith('video/')) {
+            statusDiv.textContent = `Preparing video ${i + 1} of ${files.length}...`;
+            totalNewBytes += file.size;
+            formData.append('photos', file, file.name || `video_${i + 1}.mp4`);
+          }
+        }
+
+        // Check Netlify's 6 MB serverless payload limit before uploading
+        const maxBytes = 5.5 * 1024 * 1024;
+        if (totalNewBytes > maxBytes) {
+          const totalMB = (totalNewBytes / (1024 * 1024)).toFixed(1);
+          statusDiv.textContent = `Too large (${totalMB} MB). Keep videos short or under 5.5 MB total.`;
+          sendBtn.disabled = false;
+          return;
+        }
+
+        const origKB = Math.round(totalOrigBytes / 1024);
+        const newKB = Math.round(totalNewBytes / 1024);
+        sizeInfo.textContent = `Upload size (${files.length} file${files.length > 1 ? 's' : ''}): ${origKB} KB → ${newKB} KB`;
+
+        statusDiv.textContent = `Uploading to Slack...`;
         const res = await fetch('/api/upload', { method: 'POST', body: formData });
         const result = await res.json();
 
         if (result.ok) {
-          statusDiv.textContent = 'Sent to Slack!';
-          photoInput.value = '';
+          statusDiv.textContent = `Sent to Slack!`;
+          mediaInput.value = '';
           document.getElementById('caption').value = '';
         } else {
           statusDiv.textContent = 'Error: ' + result.error;
