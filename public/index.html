@@ -47,15 +47,35 @@
     senderInput.value = localStorage.getItem('slack_sender_name') || '';
     senderInput.addEventListener('input', () => localStorage.setItem('slack_sender_name', senderInput.value));
 
+    // Helper function to populate the dropdown
+    function renderChannels(channels) {
+      if (channels && channels.length) {
+        channelSelect.innerHTML = channels
+          .map(c => `<option value="${c.id}">#${c.name}</option>`)
+          .join('');
+      } else {
+        channelSelect.innerHTML = '<option value="">No channels found (invite bot first)</option>';
+      }
+    }
+
+    // 1. Load saved channels immediately from phone storage (works offline)
+    const cachedChannels = localStorage.getItem('slack_cached_channels');
+    if (cachedChannels) {
+      renderChannels(JSON.parse(cachedChannels));
+    }
+
+    // 2. Fetch fresh channels in the background and update saved list
     fetch('/api/channels')
       .then(r => r.json())
       .then(data => {
-        if (data.channels && data.channels.length) {
-          channelSelect.innerHTML = data.channels
-            .map(c => `<option value="${c.id}">#${c.name}</option>`)
-            .join('');
-        } else {
-          channelSelect.innerHTML = '<option value="">No channels found (invite bot first)</option>';
+        if (data.channels) {
+          localStorage.setItem('slack_cached_channels', JSON.stringify(data.channels));
+          renderChannels(data.channels);
+        }
+      })
+      .catch(() => {
+        if (!cachedChannels) {
+          channelSelect.innerHTML = '<option value="">Offline - connect once to load channels</option>';
         }
       });
 
