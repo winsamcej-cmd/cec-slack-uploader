@@ -47,6 +47,8 @@
     senderInput.value = localStorage.getItem('slack_sender_name') || '';
     senderInput.addEventListener('input', () => localStorage.setItem('slack_sender_name', senderInput.value));
 
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+
     // Helper function to populate the dropdown
     function renderChannels(channels) {
       if (channels && channels.length) {
